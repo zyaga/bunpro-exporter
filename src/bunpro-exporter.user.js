@@ -2,7 +2,7 @@
 // @name         Bunpro Exporter
 // @namespace    https://github.com/zyaga/bunpro-exporter
 // @version      1.0
-// @description  Add a floating button that exports all vocab levels to CSV on demand. Token is auto-captured; export runs only when clicked.
+// @description  Tampermonkey / Greasemonkey userscript that adds a floating export button to Bunpro.jp pages which exports all of a users in progress and learned vocabulary to a CSV file.
 // @author       Zyaga
 // @license      MIT
 // @match        https://bunpro.jp/*
