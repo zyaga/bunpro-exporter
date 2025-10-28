@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bunpro Exporter
 // @namespace    https://github.com/zyaga/bunpro-exporter
-// @version      1.0
+// @version      1.1
 // @description  Tampermonkey / Greasemonkey userscript that adds a floating export button to Bunpro.jp pages which exports all of a users in progress and learned vocabulary to a CSV file.
 // @author       Zyaga
 // @license      MIT
@@ -18,6 +18,7 @@
 // @run-at       document-end
 // ==/UserScript==
 
+// Only run while on the /dashboard page
 // --- Efficient dashboard detector ---
 (function setupDashboardDetector() {
   let active = false;
