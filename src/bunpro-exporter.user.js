@@ -18,12 +18,63 @@
 // @run-at       document-end
 // ==/UserScript==
 
-(() => {
-  if (window.__BUNPRO_EXPORTER_UI__) return;
-  window.__BUNPRO_EXPORTER_UI__ = true;
+// --- Efficient dashboard detector ---
+(function setupDashboardDetector() {
+  let active = false;
+  let lastPath = location.pathname;
 
-  /************** 1) Inject page-scope token hook (no auto-run) **************/
-  const hookCode = `
+  function checkRoute() {
+    const isDashboard = location.pathname.startsWith("/dashboard");
+    if (isDashboard && !active) {
+      active = true;
+      main();
+    } else if (!isDashboard && active) {
+      active = false;
+      document.querySelector(".bp-fab-wrap")?.remove();
+      window.__BUNPRO_EXPORTER_UI__ = false;
+    }
+    lastPath = location.pathname;
+  }
+
+  // Hook the history API (covers most SPA transitions)
+  const _ps = history.pushState;
+  const _rs = history.replaceState;
+  history.pushState = function () {
+    _ps.apply(this, arguments);
+    window.dispatchEvent(new Event("locationchange"));
+  };
+  history.replaceState = function () {
+    _rs.apply(this, arguments);
+    window.dispatchEvent(new Event("locationchange"));
+  };
+  window.addEventListener("popstate", () =>
+    window.dispatchEvent(new Event("locationchange")),
+  );
+  window.addEventListener("locationchange", checkRoute);
+
+  // Observe the main React mount point (catches internal rerenders)
+  const root = document.querySelector("main") || document.body;
+  const observer = new MutationObserver(() => {
+    if (location.pathname !== lastPath) {
+      checkRoute();
+    }
+  });
+  observer.observe(root, { childList: true, subtree: true });
+
+  // Initial run
+  checkRoute();
+})();
+// --- end detector ---
+
+function main() {
+  (() => {
+    if (window.__BUNPRO_EXPORTER_UI__) return;
+    window.__BUNPRO_EXPORTER_UI__ = true;
+
+    if (!location.pathname.startsWith("/dashboard")) return;
+
+    /************** 1) Inject page-scope token hook (no auto-run) **************/
+    const hookCode = `
     (function(){
       function normalize(raw){ if(!raw) return null; return raw.includes("Token token=")? raw.split("Token token=")[1] : raw.trim(); }
       function postToken(t){ if(!t) return; window.__BUNPRO_TOKEN__ = t; window.postMessage({type:"bunpro_token", token:t},"*"); }
@@ -58,23 +109,23 @@
       console.log("🟢 [Page] Bunpro token hook injected.");
     })();
   `;
-  const sc = document.createElement("script");
-  sc.textContent = hookCode;
-  document.documentElement.appendChild(sc);
-  sc.remove();
+    const sc = document.createElement("script");
+    sc.textContent = hookCode;
+    document.documentElement.appendChild(sc);
+    sc.remove();
 
-  // Keep latest token in GM storage
-  let latestToken = null;
-  window.addEventListener("message", async (ev) => {
-    if (!ev?.data || ev.data.type !== "bunpro_token") return;
-    latestToken = ev.data.token;
-    try {
-      await GM_setValue("bunpro_token", latestToken);
-    } catch {}
-  });
+    // Keep latest token in GM storage
+    let latestToken = null;
+    window.addEventListener("message", async (ev) => {
+      if (!ev?.data || ev.data.type !== "bunpro_token") return;
+      latestToken = ev.data.token;
+      try {
+        await GM_setValue("bunpro_token", latestToken);
+      } catch {}
+    });
 
-  /************** 2) Floating button UI **************/
-  const styles = `
+    /************** 2) Floating button UI **************/
+    const styles = `
     .bp-fab-wrap {
       position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
       display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
@@ -102,166 +153,168 @@
     .bp-success { background: #16a34a; color: #fff; }
     .bp-error { background: #dc2626; color: #fff; }
   `;
-  const st = document.createElement("style");
-  st.textContent = styles;
-  document.head.appendChild(st);
+    const st = document.createElement("style");
+    st.textContent = styles;
+    document.head.appendChild(st);
 
-  const wrap = document.createElement("div");
-  wrap.className = "bp-fab-wrap";
-  const toast = document.createElement("div");
-  toast.className = "bp-toast";
-  toast.style.display = "none";
-  const btn = document.createElement("button");
-  btn.className = "bp-fab";
-  btn.innerHTML = `📝 Export Bunpro CSV`;
+    const wrap = document.createElement("div");
+    wrap.className = "bp-fab-wrap";
+    const toast = document.createElement("div");
+    toast.className = "bp-toast";
+    toast.style.display = "none";
+    const btn = document.createElement("button");
+    btn.className = "bp-fab";
+    btn.innerHTML = `📝 Export Bunpro CSV`;
 
-  wrap.appendChild(toast);
-  wrap.appendChild(btn);
-  document.body.appendChild(wrap);
+    wrap.appendChild(toast);
+    wrap.appendChild(btn);
+    document.body.appendChild(wrap);
 
-  function showToast(text, variant = "") {
-    toast.textContent = text;
-    toast.className = `bp-toast ${variant}`;
-    toast.style.display = "block";
-    clearTimeout(showToast._t);
-    showToast._t = setTimeout(() => {
-      toast.style.display = "none";
-    }, 4000);
-  }
-
-  function setLoading(on) {
-    if (on) {
-      btn.classList.add("bp-disabled");
-      btn.innerHTML = `<span class="bp-spinner"></span> Exporting…`;
-    } else {
-      btn.classList.remove("bp-disabled");
-      btn.innerHTML = `📝 Export Bunpro CSV`;
-    }
-  }
-
-  /************** 3) Click handler -> run exporter **************/
-  btn.addEventListener("click", async () => {
-    setLoading(true);
-
-    // Wait for token (most of the time we already have it)
-    let token = latestToken || (await GM_getValue("bunpro_token"));
-    const t0 = Date.now();
-    while (!token && Date.now() - t0 < 30000) {
-      // wait up to 30s
-      await new Promise((r) => setTimeout(r, 300));
-      token = latestToken || (await GM_getValue("bunpro_token"));
-    }
-    if (!token) {
-      setLoading(false);
-      showToast(
-        "Couldn’t get token. Trigger any Bunpro request (e.g. ‘See More’) and click again.",
-        "bp-error",
-      );
-      return;
+    function showToast(text, variant = "") {
+      toast.textContent = text;
+      toast.className = `bp-toast ${variant}`;
+      toast.style.display = "block";
+      clearTimeout(showToast._t);
+      showToast._t = setTimeout(() => {
+        toast.style.display = "none";
+      }, 4000);
     }
 
-    try {
-      const total = await runExporter(token, (msg) => showToast(msg));
-      btn.innerHTML = `✅ Done (${total} items)`;
-      showToast(`Exported ${total} items. CSV downloaded.`, "bp-success");
-      try {
-        GM_notification({
-          title: "Bunpro Export Complete",
-          text: `${total} items exported`,
-          timeout: 4000,
-        });
-      } catch {}
-    } catch (e) {
-      console.error(e);
-      showToast(`Export failed: ${e?.message || e}`, "bp-error");
-      setLoading(false);
-      return;
-    }
-
-    // reset after a bit
-    setTimeout(() => setLoading(false), 1800);
-  });
-
-  /************** 4) Exporter (same logic, just callable) **************/
-  async function runExporter(token, notify) {
-    const LEVELS = [
-      { api: "beginner", label: "Beginner" },
-      { api: "adept", label: "Adept" },
-      { api: "seasoned", label: "Seasoned" },
-      { api: "expert", label: "Expert" },
-      { api: "master", label: "Master" },
-    ];
-    const TYPE = "Vocab";
-    const BASE = `https://api.bunpro.jp/api/frontend/user_stats/srs_level_details?reviewable_type=${TYPE}&level=`;
-
-    const all = new Map();
-
-    async function fetchLevel(api, label) {
-      let page = 1;
-      notify?.(`Fetching ${label}…`);
-      while (true) {
-        const url = `${BASE}${api}&page=${page}&_=${Date.now()}`;
-        const res = await fetch(url, {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-          headers: {
-            Authorization: `Token token=${token}`,
-            Accept: "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-            "Cache-Control": "no-cache",
-            Pragma: "no-cache",
-          },
-        });
-        if (!res.ok) {
-          if (res.status === 500) break; // end
-          throw new Error(`${label} HTTP ${res.status} on page ${page}`);
-        }
-        const j = await res.json();
-        const d = j.reviews?.data || [];
-        const inc = j.reviews?.included || [];
-        if (!d.length && !inc.length) break;
-
-        const vocabMap = new Map(
-          inc.map((v) => [
-            String(v.id),
-            {
-              title: (v.attributes?.title ?? "").trim(),
-              meaning: (v.attributes?.meaning ?? "").trim(),
-            },
-          ]),
-        );
-
-        for (const r of d) {
-          const id = String(r.attributes?.reviewable_id ?? "");
-          const v = vocabMap.get(id);
-          if (v && v.title && !all.has(v.title))
-            all.set(v.title, [v.title, v.meaning, label]);
-        }
-
-        page++;
-        await new Promise((r) => setTimeout(r, 150)); // be polite
+    function setLoading(on) {
+      if (on) {
+        btn.classList.add("bp-disabled");
+        btn.innerHTML = `<span class="bp-spinner"></span> Exporting…`;
+      } else {
+        btn.classList.remove("bp-disabled");
+        btn.innerHTML = `📝 Export Bunpro CSV`;
       }
     }
 
-    for (const lvl of LEVELS) await fetchLevel(lvl.api, lvl.label);
+    /************** 3) Click handler -> run exporter **************/
+    btn.addEventListener("click", async () => {
+      setLoading(true);
 
-    // Build and download CSV
-    let csv = '"word","description","progress"\n';
-    for (const [, [w, d, p]] of all)
-      csv += `"${w.replace(/"/g, '""')}","${d.replace(/"/g, '""')}","${p}"\n`;
+      // Wait for token (most of the time we already have it)
+      let token = latestToken || (await GM_getValue("bunpro_token"));
+      const t0 = Date.now();
+      while (!token && Date.now() - t0 < 30000) {
+        // wait up to 30s
+        await new Promise((r) => setTimeout(r, 300));
+        token = latestToken || (await GM_getValue("bunpro_token"));
+      }
+      if (!token) {
+        setLoading(false);
+        showToast(
+          "Couldn’t get token. Trigger any Bunpro request (e.g. ‘See More’) and click again.",
+          "bp-error",
+        );
+        return;
+      }
 
-    const blob = new Blob([csv], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `bunpro_vocab_all_levels_${Date.now()}.csv`;
-    a.click();
+      try {
+        const total = await runExporter(token, (msg) => showToast(msg));
+        btn.innerHTML = `✅ Done (${total} items)`;
+        showToast(`Exported ${total} items. CSV downloaded.`, "bp-success");
+        try {
+          GM_notification({
+            title: "Bunpro Export Complete",
+            text: `${total} items exported`,
+            timeout: 4000,
+          });
+        } catch {}
+      } catch (e) {
+        console.error(e);
+        showToast(`Export failed: ${e?.message || e}`, "bp-error");
+        setLoading(false);
+        return;
+      }
 
-    return all.size;
-  }
+      // reset after a bit
+      setTimeout(() => setLoading(false), 1800);
+    });
 
-  // Optional initial hint
-  console.log(
-    "🟢 Bunpro Exporter ready — use the floating button when you want to export.",
-  );
-})();
+    /************** 4) Exporter (same logic, just callable) **************/
+    async function runExporter(token, notify) {
+      const LEVELS = [
+        { api: "beginner", label: "Beginner" },
+        { api: "adept", label: "Adept" },
+        { api: "seasoned", label: "Seasoned" },
+        { api: "expert", label: "Expert" },
+        { api: "master", label: "Master" },
+      ];
+      const TYPE = "Vocab";
+      const BASE = `https://api.bunpro.jp/api/frontend/user_stats/srs_level_details?reviewable_type=${TYPE}&level=`;
+
+      const all = new Map();
+
+      async function fetchLevel(api, label) {
+        let page = 1;
+        notify?.(`Fetching ${label}…`);
+        while (true) {
+          const url = `${BASE}${api}&page=${page}&_=${Date.now()}`;
+          const res = await fetch(url, {
+            method: "GET",
+            credentials: "include",
+            cache: "no-store",
+            headers: {
+              Authorization: `Token token=${token}`,
+              Accept: "application/json",
+              "X-Requested-With": "XMLHttpRequest",
+              "Cache-Control": "no-cache",
+              Pragma: "no-cache",
+            },
+          });
+          if (!res.ok) {
+            if (res.status === 500) break; // end
+            throw new Error(`${label} HTTP ${res.status} on page ${page}`);
+          }
+          const j = await res.json();
+          const d = j.reviews?.data || [];
+          const inc = j.reviews?.included || [];
+          if (!d.length && !inc.length) break;
+
+          const vocabMap = new Map(
+            inc.map((v) => [
+              String(v.id),
+              {
+                title: (v.attributes?.title ?? "").trim(),
+                meaning: (v.attributes?.meaning ?? "").trim(),
+              },
+            ]),
+          );
+
+          for (const r of d) {
+            const id = String(r.attributes?.reviewable_id ?? "");
+            const v = vocabMap.get(id);
+            if (v && v.title && !all.has(v.title))
+              all.set(v.title, [v.title, v.meaning, label]);
+          }
+
+          page++;
+          await new Promise((r) => setTimeout(r, 150)); // be polite
+        }
+      }
+
+      for (const lvl of LEVELS) await fetchLevel(lvl.api, lvl.label);
+
+      // Build and download CSV
+      let csv = '"word","description","progress"\n';
+      for (const [, [w, d, p]] of all)
+        csv += `"${w.replace(/"/g, '""')}","${d.replace(/"/g, '""')}","${p}"\n`;
+
+      const blob = new Blob([csv], { type: "text/csv" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `bunpro_vocab_all_levels_${Date.now()}.csv`;
+      a.click();
+
+      return all.size;
+    }
+
+    // Optional initial hint
+    console.log(
+      "🟢 Bunpro Exporter ready — use the floating button when you want to export.",
+    );
+  })();
+}
+main();
